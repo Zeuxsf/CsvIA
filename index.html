@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mesclar CSV</title>
+<title>Mesclar CSV e Excel</title>
 <style>
 :root {
   --bg: #eef1f0;
@@ -105,15 +105,15 @@ tr:last-child td { border-bottom: 0; }
 <body>
 <main>
   <header>
-    <h1>Mesclar planilhas CSV</h1>
+    <h1>Mesclar planilhas CSV e Excel</h1>
     <p>Os arquivos são processados no seu navegador e não são enviados a nenhum servidor.</p>
   </header>
 
   <section>
     <h2>Arquivos</h2>
     <label class="drop" id="drop">
-      <input type="file" id="fileInput" accept=".csv,text/csv" multiple>
-      <strong>Escolha os arquivos CSV</strong> ou arraste-os para cá
+      <input type="file" id="fileInput" accept=".csv,.xlsx,.xls,text/csv" multiple>
+      <strong>Escolha os arquivos CSV ou Excel (.xlsx, .xls)</strong> ou arraste-os para cá
     </label>
     <ul id="fileList" class="hidden" style="margin-top:16px"></ul>
   </section>
@@ -147,10 +147,19 @@ tr:last-child td { border-bottom: 0; }
       </label>
     </div>
 
-    <label class="field" style="margin-bottom:0">
+    <label class="field">
+      <span>Formato do arquivo final</span>
+      <select id="outFormat">
+        <option value="auto">Igual ao do primeiro arquivo</option>
+        <option value="csv">CSV</option>
+        <option value="xlsx">Excel (.xlsx)</option>
+      </select>
+    </label>
+
+    <label class="field" id="delimField" style="margin-bottom:0">
       <span>Separador do arquivo final</span>
       <select id="outDelim">
-        <option value="auto">Igual ao do primeiro arquivo</option>
+        <option value="auto">Igual ao do primeiro CSV</option>
         <option value=";">Ponto e vírgula (;)</option>
         <option value=",">Vírgula (,)</option>
         <option value="&#9;">Tabulação</option>
@@ -166,6 +175,7 @@ tr:last-child td { border-bottom: 0; }
   </section>
 </main>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script>
 const state = { files: [], result: null };
 
@@ -180,6 +190,8 @@ const keySelect = el('keySelect');
 const keyNotice = el('keyNotice');
 const joinType = el('joinType');
 const outDelim = el('outDelim');
+const outFormat = el('outFormat');
+const delimField = el('delimField');
 const summary = el('summary');
 const preview = el('preview');
 const downloadBtn = el('download');
@@ -244,25 +256,61 @@ function uniqueHeaders(raw) {
   });
 }
 
-async function readFile(file) {
-  const text = decode(await file.arrayBuffer());
-  const delim = detectDelimiter(text);
-  const table = parse(text, delim);
+function buildEntry(name, table, delim, kind) {
   if (!table.length) return null;
-  const headers = uniqueHeaders(table[0]);
+  const headers = uniqueHeaders(table[0].map(String));
   const rows = table.slice(1).map(cells => {
     const obj = {};
     headers.forEach((h, i) => { obj[h] = cells[i] !== undefined ? cells[i] : ''; });
     return obj;
   });
-  return { name: file.name, headers, rows, delim };
+  return { name, headers, rows, delim, kind };
+}
+
+function sheetToTable(ws) {
+  if (!ws['!ref']) return [];
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  const table = [];
+  for (let r = range.s.r; r <= range.e.r; r++) {
+    const row = [];
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const cell = ws[XLSX.utils.encode_cell({ r, c })];
+      if (!cell) row.push('');
+      else if (cell.t === 'n' && !(cell.z && XLSX.SSF.is_date(cell.z))) row.push(cell.v);
+      else row.push(cell.w !== undefined ? cell.w : String(cell.v));
+    }
+    if (row.some(v => v !== '')) table.push(row);
+  }
+  return table;
+}
+
+async function readFile(file) {
+  if (/\.csv$/i.test(file.name) || file.type === 'text/csv') {
+    const text = decode(await file.arrayBuffer());
+    const delim = detectDelimiter(text);
+    const entry = buildEntry(file.name, parse(text, delim), delim, 'csv');
+    return entry ? [entry] : [];
+  }
+  const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+  const multiple = wb.SheetNames.length > 1;
+  const entries = [];
+  wb.SheetNames.forEach(sheetName => {
+    const name = multiple ? file.name + ' (' + sheetName + ')' : file.name;
+    const entry = buildEntry(name, sheetToTable(wb.Sheets[sheetName]), null, 'xlsx');
+    if (entry) entries.push(entry);
+  });
+  return entries;
 }
 
 async function addFiles(list) {
   for (const file of Array.from(list)) {
-    if (!/\.csv$/i.test(file.name) && file.type !== 'text/csv') continue;
-    const data = await readFile(file);
-    if (data) state.files.push(data);
+    if (!/\.(csv|xlsx|xls)$/i.test(file.name) && file.type !== 'text/csv') continue;
+    try {
+      const entries = await readFile(file);
+      entries.forEach(e => state.files.push(e));
+    } catch (e) {
+      alert('Não foi possível ler o arquivo ' + file.name + '.');
+    }
   }
   fileInput.value = '';
   refresh();
@@ -283,7 +331,7 @@ function renderFiles() {
     name.textContent = f.name;
     const meta = document.createElement('div');
     meta.className = 'meta';
-    meta.textContent = f.rows.length + ' linhas, ' + f.headers.length + ' colunas, separador ' + delimiterName(f.delim);
+    meta.textContent = f.rows.length + ' linhas, ' + f.headers.length + ' colunas, ' + (f.delim ? 'separador ' + delimiterName(f.delim) : 'planilha Excel');
     info.append(name, meta);
     const remove = document.createElement('button');
     remove.className = 'remove';
@@ -341,7 +389,7 @@ function join(key, type) {
   let headers = first.headers.slice();
   let rows = first.rows.map(r => Object.assign({}, r));
   for (const f of state.files.slice(1)) {
-    const suffix = f.name.replace(/\.csv$/i, '');
+    const suffix = f.name.replace(/\.(csv|xlsx|xls)/i, '');
     const rename = {};
     const addedHeaders = [];
     f.headers.forEach(h => {
@@ -393,8 +441,20 @@ function currentMode() {
   return document.querySelector('input[name="mode"]:checked').value;
 }
 
+function outputFormat() {
+  return outFormat.value === 'auto' ? state.files[0].kind : outFormat.value;
+}
+
 function outputDelimiter() {
-  return outDelim.value === 'auto' ? state.files[0].delim : outDelim.value;
+  if (outDelim.value !== 'auto') return outDelim.value;
+  const withDelim = state.files.find(f => f.delim);
+  return withDelim ? withDelim.delim : ';';
+}
+
+function updateOutputControls() {
+  const format = outputFormat();
+  delimField.classList.toggle('hidden', format !== 'csv');
+  downloadBtn.textContent = 'Baixar mesclado.' + format;
 }
 
 function compute() {
@@ -438,6 +498,7 @@ function refresh() {
   optionsSection.classList.toggle('hidden', !hasFiles);
   joinOptions.classList.toggle('hidden', currentMode() !== 'join');
   renderKeyOptions();
+  if (hasFiles) updateOutputControls();
   renderResult();
 }
 
@@ -457,6 +518,14 @@ function toCSV(headers, rows, d) {
 
 downloadBtn.addEventListener('click', () => {
   if (!state.result) return;
+  if (outputFormat() === 'xlsx') {
+    const { headers, rows } = state.result;
+    const aoa = [headers].concat(rows.map(r => headers.map(h => r[h])));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Mesclado');
+    XLSX.writeFile(wb, 'mesclado.xlsx');
+    return;
+  }
   const csv = '\uFEFF' + toCSV(state.result.headers, state.result.rows, outputDelimiter());
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
   const a = document.createElement('a');
@@ -484,6 +553,7 @@ document.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener(
 keySelect.addEventListener('change', renderResult);
 joinType.addEventListener('change', renderResult);
 outDelim.addEventListener('change', renderResult);
+outFormat.addEventListener('change', updateOutputControls);
 
 refresh();
 </script>
